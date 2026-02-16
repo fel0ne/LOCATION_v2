@@ -11,3 +11,9 @@
 [submodule "third_party/SDL3"]
 	path = third_party/SDL3
 	url = https://github.com/libsdl-org/SDL.git
+[submodule "third_party/libzmq"]
+	path = third_party/libzmq
+	url = https://github.com/zeromq/libzmq.git
+[submodule "third_party/cppzmq"]
+	path = third_party/cppzmq
+	url = https://github.com/zeromq/cppzmq.git

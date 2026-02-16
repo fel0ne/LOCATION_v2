@@ -8,6 +8,15 @@ set(THIRD_PARTY_DIR ${PROJECT_SOURCE_DIR}/third_party)
 set(SRC_DIR ${PROJECT_SOURCE_DIR}/src)
 set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/include)
 
+set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE) # Отключаем тесты, чтобы быстрее собиралось
+
+
+
+
+
+
+add_subdirectory(${THIRD_PARTY_DIR}/libzmq)
+
 # =================== SDL3 ===================
 add_subdirectory(${THIRD_PARTY_DIR}/SDL3)
 
@@ -52,11 +61,14 @@ add_library(imgui STATIC
     ${THIRD_PARTY_DIR}/imgui/imgui_widgets.cpp
     ${IMGUI_SDL_BACKEND}
     ${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_opengl3.cpp
+    ${THIRD_PARTY_DIR}/imgui/backends
 )
 
 target_include_directories(imgui PUBLIC 
     ${THIRD_PARTY_DIR}/imgui
     ${THIRD_PARTY_DIR}/SDL3/include
+    ${THIRD_PARTY_DIR}/imgui/backends
+    
 )
 
 # =================== ImPlot ===================
@@ -78,13 +90,22 @@ target_link_libraries(main PRIVATE
     SDL3::SDL3
     OpenGL::GL
     glew_s  # glew-cmake создает статическую библиотеку
+    libzmq
 )
 
 # Добавить директории заголовков
 target_include_directories(main PRIVATE
     ${THIRD_PARTY_DIR}/SDL3/include
     ${THIRD_PARTY_DIR}/GLEW/include
+    ${THIRD_PARTY_DIR}/cppzmq
 )
+
+#================= Сборка основного ядра ZeroMQ=================
+
+
+
+
+
 
 if(WIN32)
     # Копирование SDL3.dll

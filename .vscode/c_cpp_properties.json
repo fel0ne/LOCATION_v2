@@ -7,7 +7,10 @@
                 "${workspaceFolder}/third_party/imgui",
                 "${workspaceFolder}/third_party/SDL3/include",
                 "${workspaceFolder}/third_party/implot",
-                "${workspaceFolder}/third_party/SDL2/include"
+                "${workspaceFolder}/third_party/SDL2/include",
+                "${workspaceFolder}/third_party/imgui/backends",
+                "${workspaceFolder}/third_party/cppzmq",
+                "${workspaceFolder}/third_party/libzmq/include"
             ],
             "defines": [
                 "_DEBUG",
