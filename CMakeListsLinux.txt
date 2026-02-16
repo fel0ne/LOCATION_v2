@@ -9,25 +9,50 @@ set(SRC_DIR ${PROJECT_SOURCE_DIR}/src)
 set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/include)
 
 # =================== SDL3 ===================
-add_subdirectory(${THIRD_PARTY_DIR}/SDL3)
+# На Linux ищем системную SDL3 или используем подмодуль
+find_package(SDL3 QUIET)
+
+if(SDL3_FOUND)
+    message(STATUS "Found system SDL3")
+    set(SDL3_TARGET SDL3::SDL3)
+else()
+    message(STATUS "System SDL3 not found, building from submodule")
+    add_subdirectory(${THIRD_PARTY_DIR}/SDL3)
+    set(SDL3_TARGET SDL3::SDL3)
+endif()
 
 # =================== GLEW ===================
-if(WIN32)
-    # Оставляем вашу логику для Windows, если планируете возвращаться
-    set(GLEW_PATH ${THIRD_PARTY_DIR}/GLEW)
-    find_library(GLEW_LIB NAMES glew32 glew32s PATHS "${GLEW_PATH}/lib")
-    add_library(glew_s STATIC IMPORTED)
-    set_target_properties(glew_s PROPERTIES
-        IMPORTED_LOCATION "${GLEW_LIB}"
-        INTERFACE_INCLUDE_DIRECTORIES "${GLEW_PATH}/include"
-    )
+# На Linux используем системный GLEW
+find_package(GLEW REQUIRED)
+
+if(GLEW_FOUND)
+    message(STATUS "Found system GLEW: ${GLEW_LIBRARIES}")
+    set(GLEW_TARGET GLEW::GLEW)
 else()
-    # Логика для Linux
-    find_package(GLEW REQUIRED)
-    # Создаем алиас glew_s, чтобы не менять остальной код (target_link_libraries)
-    if(NOT TARGET glew_s)
-        add_library(glew_s INTERFACE)
-        target_link_libraries(glew_s INTERFACE GLEW::GLEW)
+    # Fallback на подмодуль если системного нет
+    message(STATUS "System GLEW not found, trying submodule")
+    set(GLEW_PATH ${THIRD_PARTY_DIR}/GLEW)
+    
+    if(EXISTS "${GLEW_PATH}/include/GL/glew.h")
+        message(STATUS "Using GLEW submodule from: ${GLEW_PATH}")
+        include_directories(${GLEW_PATH}/include)
+        
+        # Для Linux в подмодуле glew-cmake
+        add_subdirectory(${GLEW_PATH})
+        
+        if(TARGET glew_s)
+            set(GLEW_TARGET glew_s)
+        elseif(TARGET libglew_static)
+            set(GLEW_TARGET libglew_static)
+        else()
+            # Создаем импортированную библиотеку вручную
+            add_library(glew_s INTERFACE)
+            target_include_directories(glew_s INTERFACE ${GLEW_PATH}/include)
+            target_link_libraries(glew_s INTERFACE -lGLEW)
+            set(GLEW_TARGET glew_s)
+        endif()
+    else()
+        message(FATAL_ERROR "GLEW not found. Install with: sudo apt install libglew-dev")
     endif()
 endif()
 
@@ -41,6 +66,7 @@ include_directories(${INCLUDE_DIR})
 if(EXISTS "${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_sdl3.cpp")
     set(IMGUI_SDL_BACKEND "${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_sdl3.cpp")
 else()
+    message(WARNING "SDL3 backend not found, using SDL2 backend (may not work)")
     set(IMGUI_SDL_BACKEND "${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_sdl2.cpp")
 endif()
 
@@ -71,13 +97,13 @@ target_link_libraries(implot PRIVATE imgui)
 # =================== Main Executable ===================
 add_executable(main ${SRC_DIR}/main.cpp)
 
-# Подключение библиотек (glew-cmake создает target glew_s)
+# Подключение библиотек
 target_link_libraries(main PRIVATE 
     imgui
     implot
-    SDL3::SDL3
+    ${SDL3_TARGET}
     OpenGL::GL
-    glew_s  # glew-cmake создает статическую библиотеку
+    ${GLEW_TARGET}
 )
 
 # Добавить директории заголовков
@@ -86,8 +112,9 @@ target_include_directories(main PRIVATE
     ${THIRD_PARTY_DIR}/GLEW/include
 )
 
+# =================== Платформозависимые настройки ===================
 if(WIN32)
-    # Копирование SDL3.dll
+    # Windows-specific: копирование DLL
     add_custom_command(TARGET main POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:SDL3::SDL3>"
@@ -95,7 +122,6 @@ if(WIN32)
         COMMENT "Copying SDL3.dll to executable directory"
     )
     
-    # Копирование GLEW DLL если есть
     if(EXISTS "${THIRD_PARTY_DIR}/GLEW/bin/Release/x64/glew32.dll")
         add_custom_command(TARGET main POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -105,5 +131,13 @@ if(WIN32)
         )
     endif()
     
-    # Копирование OpenGL32.dll обычно не нужно, он системный
+elseif(UNIX AND NOT APPLE)
+    # Linux-specific: ничего не нужно, библиотеки системные
+    message(STATUS "Linux build: using system libraries")
+    
+    # Добавляем путь к библиотекам если нужно
+    target_link_libraries(main PRIVATE
+        ${CMAKE_DL_LIBS}
+        pthread
+    )
 endif()
