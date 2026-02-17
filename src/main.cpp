@@ -9,6 +9,8 @@
 #include "imgui_impl_opengl3.h"
 #include "implot.h"
 
+#include "nlohmann/json.hpp"
+
 #include "zmq.hpp"
 
 #define LOG_FILE "data_log.json"
@@ -107,13 +109,13 @@ void runGui() {
 void run_server(){
     zmq::context_t context(1); //количество потоков обрабатывающих все сокеты
     zmq::socket_t socket(context, zmq::socket_type::pull); //создае сокет
-    socket.bind("tcp://*:4040");//привязываем сокет скорее порт т к *  говорит о том что в последствии будем слушать все адреса
+    socket.bind("tcp://*:4040");//привязываем сокет, скорее порт т.к. *  говорит о том что в последствии будем слушать все адреса
 
     while(true){
         zmq::message_t message;
-        socket.recv(&message);
-        
-        zmq_sleep(1000);
+        socket.recv(&message);  //получение данных
+
+        zmq_sleep(1000);//спим чтобы не грузить поток
     }
 }
 

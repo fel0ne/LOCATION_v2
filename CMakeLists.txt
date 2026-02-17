@@ -98,6 +98,7 @@ target_include_directories(main PRIVATE
     ${THIRD_PARTY_DIR}/SDL3/include
     ${THIRD_PARTY_DIR}/GLEW/include
     ${THIRD_PARTY_DIR}/cppzmq
+    ${THIRD_PARTY_DIR}/json/include
 )
 
 #================= Сборка основного ядра ZeroMQ=================

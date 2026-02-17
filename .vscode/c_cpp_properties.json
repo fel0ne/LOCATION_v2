@@ -10,7 +10,8 @@
                 "${workspaceFolder}/third_party/SDL2/include",
                 "${workspaceFolder}/third_party/imgui/backends",
                 "${workspaceFolder}/third_party/cppzmq",
-                "${workspaceFolder}/third_party/libzmq/include"
+                "${workspaceFolder}/third_party/libzmq/include",
+                "${workspaceFolder}/third_party/json/include"
             ],
             "defines": [
                 "_DEBUG",
