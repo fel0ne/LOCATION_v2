@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 project(LOCATION_V2)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(THIRD_PARTY_DIR ${PROJECT_SOURCE_DIR}/third_party)
@@ -10,10 +10,17 @@ set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/include)
 
 set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE) # Отключаем тесты, чтобы быстрее собиралось
 
+set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
 
 
+set(SKIP_PQXX_TESTS ON CACHE BOOL "" FORCE)
+set(SKIP_PQXX_DOC ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+find_package(PostgreSQL REQUIRED)
 
-
+add_subdirectory(${THIRD_PARTY_DIR}/libpqxx)
 
 add_subdirectory(${THIRD_PARTY_DIR}/libzmq)
 
@@ -80,6 +87,14 @@ add_library(implot STATIC
 target_include_directories(implot PUBLIC ${THIRD_PARTY_DIR}/implot)
 target_link_libraries(implot PRIVATE imgui)
 
+
+
+#=============psql=====================
+
+
+
+
+
 # =================== Main Executable ===================
 add_executable(main ${SRC_DIR}/main.cpp)
 
@@ -91,6 +106,8 @@ target_link_libraries(main PRIVATE
     OpenGL::GL
     glew_s  # glew-cmake создает статическую библиотеку
     libzmq
+    pqxx 
+    PostgreSQL::PostgreSQL
 )
 
 # Добавить директории заголовков
@@ -99,6 +116,8 @@ target_include_directories(main PRIVATE
     ${THIRD_PARTY_DIR}/GLEW/include
     ${THIRD_PARTY_DIR}/cppzmq
     ${THIRD_PARTY_DIR}/json/include
+    ${THIRD_PARTY_DIR}/libpqxx/include
+    ${CMAKE_CURRENT_BINARY_DIR}/third_party/libpqxx/include
 )
 
 #================= Сборка основного ядра ZeroMQ=================

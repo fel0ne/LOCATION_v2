@@ -11,7 +11,9 @@
                 "${workspaceFolder}/third_party/imgui/backends",
                 "${workspaceFolder}/third_party/cppzmq",
                 "${workspaceFolder}/third_party/libzmq/include",
-                "${workspaceFolder}/third_party/json/include"
+                "${workspaceFolder}/third_party/json/include",
+                "${workspaceFolder}/third_party/libpqxx/include",
+                "${workspaceFolder}/build/third_party/libpqxx/include"
             ],
             "defines": [
                 "_DEBUG",

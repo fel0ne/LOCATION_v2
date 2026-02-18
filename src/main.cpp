@@ -3,6 +3,7 @@
 #include <SDL3/SDL_opengl.h>
 #include <iostream>
 #include <thread>
+#include <string>
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
@@ -12,6 +13,8 @@
 #include "nlohmann/json.hpp"
 
 #include "zmq.hpp"
+
+#include <pqxx/pqxx>
 
 #define LOG_FILE "data_log.json"
 
@@ -106,25 +109,48 @@ void runGui() {
 }
 
 
+
+//безшовность????
 void run_server(){
+    
     zmq::context_t context(1); //количество потоков обрабатывающих все сокеты
     zmq::socket_t socket(context, zmq::socket_type::pull); //создае сокет
     socket.bind("tcp://*:4040");//привязываем сокет, скорее порт т.к. *  говорит о том что в последствии будем слушать все адреса
 
     while(true){
+        std::string message_str; 
+        
         zmq::message_t message;
         socket.recv(&message);  //получение данных
+        
+        
+        //===================TEST=======================
+        message_str = std::string(static_cast<char*>(message.data()), message.size()); //преобразуем в строку сообщениие, кастуем в чар чтобы избавится от указателя на пустоту
+        //message_str = R"({"accuracy":18.5,"latitude":55.04407833333333,"longitude":82.98355500000001,"provider":"gps","recordedTime":1763312279272,"source":"Кэш","timestamp":1763215517000})";
+        //==============================================
+        
+        
+        nlohmann::json json = nlohmann::json::parse(message_str);
+        
+        
+        //std::cerr<<json["latitude"];
 
         zmq_sleep(1000);//спим чтобы не грузить поток
+        
+
+    
+    
     }
 }
 
 int main(int argc, char *argv[]) {
     // Запускаем сервер в фоновом потоке
-    // std::thread server_t(run_server); 
-    // server_t.detach(); // Пусть живет сам по себе
+    std::thread server_t(run_server); 
+    server_t.detach(); // Пусть живет сам по себе
 
     runGui(); // GUI запускаем строго в основном потоке
+
+
 
     return 0;
 }
