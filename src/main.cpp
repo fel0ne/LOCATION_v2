@@ -16,6 +16,7 @@
 
 #include <pqxx/pqxx>
 
+
 #define LOG_FILE "data_log.json"
 
 struct JSONData{
@@ -27,6 +28,14 @@ struct JSONData{
     char source[64];
     long long timestamp;
 };
+
+
+std::string make_grid_key(double lat, double lon) { // генерируем ключ чтобы в будущем менять значение в базе если оноже есть в неком радиусе
+    std::stringstream ss;
+    // Округляем до 4 знаков после запятой (шаг ~11 метров)
+    ss << std::fixed << std::setprecision(5) << lat << ":" << lon;
+    return ss.str();
+}
 
 void runGui() {
     // 1. Инициализация SDL3
@@ -113,29 +122,108 @@ void runGui() {
 //безшовность????
 void run_server(){
     
+    try {
+        // 1. Подключаемся к дефолтной базе 'postgres'
+        pqxx::connection temp_conn(" dbname=postgres user=fel0ne password=123");
+        pqxx::nontransaction N(temp_conn);
+
+        // 2. Проверяем, существует ли наша база
+        pqxx::result r = N.exec_params(
+            "SELECT 1 FROM pg_database WHERE datname = $1", 
+            "location_db"
+        );
+
+        if (r.empty()) {
+            std::cout << "Database 'location_db' not found. Creating..." << std::endl;
+            // CREATE DATABASE нельзя запускать в транзакции, поэтому используем nontransaction
+            N.exec("CREATE DATABASE location_db");
+        }
+        temp_conn.close(); // Закрываем временное соединение
+
+        // 3. Теперь подключаемся уже к нашей базе и создаем таблицу
+        pqxx::connection conn(" dbname=location_db user=fel0ne password=123");
+        pqxx::work W(conn);
+        W.exec(R"(CREATE TABLE IF NOT EXISTS location_history (
+                id SERIAL PRIMARY KEY,
+                latitude DOUBLE PRECISION NOT NULL,
+                longitude DOUBLE PRECISION NOT NULL,
+                accuracy REAL,               
+                provider VARCHAR(20),          
+                source VARCHAR(50),           
+                recorded_time BIGINT NOT NULL, 
+                event_timestamp BIGINT,       
+                server_received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                grid_key TEXT UNIQUE
+            );
+        )");
+        W.commit();
+        std::cout << "Database and Table are ready!" << std::endl;
+
+    } catch (const std::exception &e) {
+        std::cerr << "Setup error: " << e.what() << std::endl;
+    }
+
+
+
     zmq::context_t context(1); //количество потоков обрабатывающих все сокеты
     zmq::socket_t socket(context, zmq::socket_type::pull); //создае сокет
     socket.bind("tcp://*:4040");//привязываем сокет, скорее порт т.к. *  говорит о том что в последствии будем слушать все адреса
-
+    pqxx::connection conn(" dbname=location_db user=fel0ne password=123");
     while(true){
         std::string message_str; 
         
         zmq::message_t message;
         socket.recv(&message);  //получение данных
-        
+        message_str = std::string(static_cast<char*>(message.data()), message.size()); //преобразуем в строку сообщениие, кастуем в чар чтобы избавится от указателя на пустоту
         
         //===================TEST=======================
-        message_str = std::string(static_cast<char*>(message.data()), message.size()); //преобразуем в строку сообщениие, кастуем в чар чтобы избавится от указателя на пустоту
         //message_str = R"({"accuracy":18.5,"latitude":55.04407833333333,"longitude":82.98355500000001,"provider":"gps","recordedTime":1763312279272,"source":"Кэш","timestamp":1763215517000})";
         //==============================================
         
+
+        
         
         nlohmann::json json = nlohmann::json::parse(message_str);
-        
-        
+       
+        try {
+            
+            pqxx::work W(conn);
+            std::string grid_key = make_grid_key(json["latitude"],json["longitude"]);
+
+            W.exec_params(
+                R"(INSERT INTO location_history 
+                (latitude, longitude, accuracy, provider, source, recorded_time, event_timestamp, grid_key) 
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+                ON CONFLICT (grid_key) DO UPDATE SET 
+                    latitude = EXCLUDED.latitude, 
+                    longitude = EXCLUDED.longitude, 
+                    accuracy = EXCLUDED.accuracy, 
+                    recorded_time = EXCLUDED.recorded_time, 
+                    event_timestamp = EXCLUDED.event_timestamp,
+                    server_received_at = CURRENT_TIMESTAMP;)",
+                json["latitude"].get<double>(),
+                json["longitude"].get<double>(),
+                json.value("accuracy", 0.0),
+                json.value("provider", "unknown"),
+                json.value("source", "unknown"),
+                json["recordedTime"].get<long long>(),
+                json.value("timestamp", 0LL),
+                grid_key
+            );
+
+            // Если не вызвать W.commit(), данные НЕ сохранятся в базе!
+            W.commit();
+
+            std::cout << "[DB] Данные успешно сохранены!" << std::endl;
+
+        } catch (const std::exception &e) {
+            std::cerr << "[DB Error] Ошибка вставки: " << e.what() << std::endl;
+            // Транзакция W автоматически откатится (rollback) при выходе из области видимости
+        }
+
         //std::cerr<<json["latitude"];
 
-        zmq_sleep(1000);//спим чтобы не грузить поток
+        //zmq_sleep(1000);//спим чтобы не грузить поток
         
 
     
@@ -144,6 +232,9 @@ void run_server(){
 }
 
 int main(int argc, char *argv[]) {
+
+    
+
     // Запускаем сервер в фоновом потоке
     std::thread server_t(run_server); 
     server_t.detach(); // Пусть живет сам по себе
