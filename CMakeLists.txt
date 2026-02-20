@@ -4,9 +4,16 @@ project(LOCATION_V2)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+
 set(THIRD_PARTY_DIR ${PROJECT_SOURCE_DIR}/third_party)
 set(SRC_DIR ${PROJECT_SOURCE_DIR}/src)
 set(INCLUDE_DIR ${PROJECT_SOURCE_DIR}/include)
+
+set(SELECT_CURL_PUBLIC_SUFFIX_LIST OFF CACHE BOOL "" FORCE) # Отключает libpsl
+
+set(CPR_ENABLE_CPPCHECK OFF CACHE BOOL "" FORCE)
+set(CPR_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+
 
 set(ZMQ_BUILD_TESTS OFF CACHE BOOL "" FORCE) # Отключаем тесты, чтобы быстрее собиралось
 
@@ -20,8 +27,13 @@ set(SKIP_PQXX_DOC ON CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 find_package(PostgreSQL REQUIRED)
 
+#=============== requests ====================
+add_subdirectory(${THIRD_PARTY_DIR}/cpr)
+
+#=============== PG ==========================
 add_subdirectory(${THIRD_PARTY_DIR}/libpqxx)
 
+#=============== ZMQ =========================
 add_subdirectory(${THIRD_PARTY_DIR}/libzmq)
 
 # =================== SDL3 ===================
@@ -108,6 +120,7 @@ target_link_libraries(main PRIVATE
     libzmq
     pqxx 
     PostgreSQL::PostgreSQL
+    cpr::cpr
 )
 
 # Добавить директории заголовков

@@ -6,7 +6,9 @@
 #include <string>
 #include <mutex>
 #include <cmath>
-
+#include <cpr/cpr.h>
+#include <filesystem>
+#include <fstream>
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
@@ -19,6 +21,8 @@
 
 #include <pqxx/pqxx>
 
+
+#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h" //загруает png тайлы как текстуру opengl
 
 
@@ -26,7 +30,7 @@
 
 
 #define LOG_FILE "data_log.json"
-#define STB_IMAGE_IMPLEMENTATION
+
 
 
 
@@ -47,10 +51,10 @@ struct JSONData{
 };
 
 
-std::string make_grid_key(double lat, double lon) { // генерируем ключ чтобы в будущем менять значение в базе если оноже есть в неком радиусе
+std::string make_grid_key(double lat, double lon) { // генерируем ключ чтобы в будущем менять значение в базе если оно же есть в неком радиусе
     std::stringstream ss;
-    // Округляем до 4 знаков после запятой (шаг ~11 метров)
-    ss << std::fixed << std::setprecision(5) << lat << ":" << lon;
+    // Округляем до 4-5 знаков после запятой (шаг ~11 метров)
+    ss << std::fixed << std::setprecision(5) << lat << ":" << lon; //хи хи питону привет
     return ss.str();
 }
 
@@ -91,6 +95,87 @@ double lat2tile(double lat, int zoom) {
 }
 
 
+double tilex2lon(int x, int z) {
+    return x / std::pow(2.0, z) * 360.0 - 180.0;
+}
+
+double tiley2lat(int y, int z) {
+    double n = M_PI - 2.0 * M_PI * y / std::pow(2.0, z);
+    return 180.0 / M_PI * std::atan(0.5 * (std::exp(n) - std::exp(-n)));
+}
+
+void download_tile_cpr(int z, int x, int y) {
+    int max_tile = std::pow(2, z) - 1;
+    if (x < 0 || x > max_tile || y < 0 || y > max_tile) return;
+    std::string folder = "tiles/" + std::to_string(z) + "/" + std::to_string(x);
+    std::string path = folder + "/" + std::to_string(y) + ".png";
+
+    // Если файл уже есть, не качаем
+    if (std::filesystem::exists(path)) return;
+
+    // Создаем папки, если их нет
+    std::filesystem::create_directories(folder);
+
+    // Запрос к OpenStreetMap
+    cpr::Response r = cpr::Get(
+        cpr::Url{"https://tile.openstreetmap.org/" + std::to_string(z) + "/" + std::to_string(x) + "/" + std::to_string(y) + ".png"},
+        cpr::Header{{"User-Agent", "AuroraMapApp/1.0 (your@email.com)"}}, // OSM требует User-Agent
+        cpr::VerifySsl{false}
+    );
+
+    if (r.status_code == 200) {
+        std::ofstream ofs(path, std::ios::binary);
+        ofs << r.text;
+        ofs.close();
+        std::cout << "[MAP] Downloaded: " << path << std::endl;
+    } else {
+        std::cerr << "[MAP] Error " << r.status_code << " for tile " << x << "," << y << std::endl;
+    }
+}
+
+void thread_loader(int z, int x, int y) {
+    download_tile_cpr(z, x, y);
+}
+
+GLuint LoadTexture(const char* filename) { // получаем путь к файлу 
+    int width, height, channels; 
+    stbi_set_flip_vertically_on_load(false); //говорим не переворачивать картинку
+    
+    unsigned char* data = stbi_load(filename, &width, &height, &channels, 4); //даем файлик на растерзания  аолучая сырые байты цвета 
+    //при этом достаем 4 канала принудительно чтобы видеокарта не сильно напрягалась
+    if (!data) {
+        std::cerr << "[GL ERROR] stb_load failed for: " << filename << std::endl;
+        return 0;
+    }
+
+    GLuint textureID;
+    glGenTextures(1, &textureID); //выделяем айди
+    glBindTexture(GL_TEXTURE_2D, textureID); //биндим этот айди чтобы все изменения ниже применялись именно к нему
+    //фильтрация боремся с лесинками
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    //боремся с неприятными швами
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    //копируем данные в видеокарту  из оперативной памяти
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    //соответственно вычещаем уже не нужные данные из оперативки
+    stbi_image_free(data);
+
+    std::cout << "[GL] Loaded texture: " << filename << " ID: " << textureID << std::endl;
+    return textureID;
+}
+
+// int calculate_zoom(ImPlotRect limits) {
+//     double width = std::abs(limits.X.Max - limits.X.Min);
+//     if (width <= 0) return 15;
+//     // Логарифмическая зависимость зума от ширины экрана в градусах
+//     int z = (int)std::floor(std::log2(360.0 / width));
+//     if (z < 1) z = 1;
+//     if (z > 18) z = 18;
+//     return z;
+// }
+
 void runGui() {
     // 1. Инициализация SDL3
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK)) {
@@ -98,13 +183,11 @@ void runGui() {
         return;
     }
 
-    // Установка атрибутов OpenGL перед созданием окна
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
 
-    // 2. Создание окна
     SDL_Window* window = SDL_CreateWindow("Aurora", 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!window) {
         std::cerr << "Window Error: " << SDL_GetError() << std::endl;
@@ -113,15 +196,13 @@ void runGui() {
 
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_context);
-    SDL_GL_SetSwapInterval(1); // Включаем VSync (чтобы не было 1000 FPS и шума кулеров)
+    SDL_GL_SetSwapInterval(1); 
 
-    // Инициализация GLEW
     if (glewInit() != GLEW_OK) {
         std::cerr << "GLEW Error!" << std::endl;
         return;
     }
 
-    // 3. Инициализация ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImPlot::CreateContext();
@@ -131,95 +212,156 @@ void runGui() {
     ImGui_ImplOpenGL3_Init("#version 130");
 
     bool running = true;
-    bool mode = true; // true is server / false is host
+    bool mode = true; 
+    static std::map<std::string, GLuint> tile_cache; // база данных типо которая построена нв контейнере ключ-значение придется чистить переодически все тайлы в видеокарту не влезут
 
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL3_ProcessEvent(&event); // Отдаем события ImGui
+            ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) running = false;
         }
 
-        // Старт кадра ImGui
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
+        // --- ЛЕВАЯ ПАНЕЛЬ ---
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x * 0.2f, io.DisplaySize.y));
         ImGui::Begin("Control Panel", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
-         {
-            
+        {
             ImGui::Text("Server Status: "); 
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0, 1, 0, 1), "ONLINE"); // Зеленый текст
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), "ONLINE");
 
-            ImGui::Separator(); // Полоска
+            ImGui::Separator();
 
-            // КНОПКА: Если нажали — что-то делаем
             if (ImGui::Button("Update Data", ImVec2(-1, 30))) { 
-                // Тут потом будет бэк
-                //std::cout << "Кнопка нажата, летим в базу!" << std::endl;
                 std::thread(refresh_plot_data).detach();
             }
 
-            if (ImGui::Button("Clear Log", ImVec2(-1, 30))) {
-                // Очистка
-            }
-            
-
             if (ImGui::Button("Change mode", ImVec2(-1, 30))) {
-                if (mode){
-                    mode = false;
-                }
-                else{
-                    mode = true;
-                }
+                mode = !mode;
             }
+
             ImGui::Separator();
-            
-            // Вывод текста (как в консоли)
             ImGui::Text("Last Log:");
-            ImGui::BeginChild("LogRegion", ImVec2(0, 200), true); // Маленькое окошко внутри окна
-            if (mode){
-                    ImGui::Text("Starting server... ");
-                    ImGui::Text("Starting PG... ");
-                    ImGui::Text("Connection succesful ");
-                }
-                else{
-                    ImGui::Text("Connection to server... ");
-                    ImGui::Text("Connection succesful ");
-                }
-            ImGui::EndChild();
-
-        } ImGui::End();
-
-        // 2. Окно карты (Справа)
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.2f, 0));
-        ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x * 0.8f, io.DisplaySize.y));
-        ImGui::Begin("Map View", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar); 
-        {
-            ImGui::Text("GPS Visualization Area | Points in memory: %zu", plot_lats.size());
-            
-            // Включаем режим ImPlotFlags_Equal, чтобы карта не была растянутой
-            if (ImPlot::BeginPlot("My Track", ImVec2(-1, -1), ImPlotFlags_Equal)) {
-                ImPlot::SetupAxes("Longitude", "Latitude");
-                
-                std::lock_guard<std::mutex> lock(data_mutex);
-                if (!plot_lons.empty()) {
-                    // Рисуем линию маршрута
-                    ImPlot::SetNextLineStyle(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), 2.0f); // Оранжевый трек
-                    ImPlot::PlotLine("Path", plot_lons.data(), plot_lats.data(), (int)plot_lons.size());
-                    
-                    // Рисуем текущую точку (последнюю в векторе)
-                    ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 4, ImVec4(1,0,0,1), 1, ImVec4(1,0,0,1));
-                    ImPlot::PlotScatter("Current", &plot_lons.back(), &plot_lats.back(), 1);
-                }
-                ImPlot::EndPlot();
+            ImGui::BeginChild("LogRegion", ImVec2(0, 200), true);
+            if (mode) {
+                ImGui::Text("Starting server... ");
+                ImGui::Text("Connection successful ");
+            } else {
+                ImGui::Text("Connection to host... ");
             }
+            ImGui::EndChild();
         } 
         ImGui::End();
-        // -------------------------
+
+        // --- ПРАВАЯ ПАНЕЛЬ (КАРТА) ---
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.2f, 0));
+        ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x * 0.8f, io.DisplaySize.y));
+        ImGui::Begin("Map View", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+        {
+            if (ImPlot::BeginPlot("##MainMap", ImVec2(-1, -1), ImPlotFlags_Equal | ImPlotFlags_NoLegend)) {
+                
+                // 1. НАСТРОЙКА ОСЕЙ (Сначала это!)
+                ImPlot::SetupAxes("Longitude", "Latitude");
+                ImPlot::SetupAxesLimits(82.8, 83.1, 54.9, 55.1, ImGuiCond_FirstUseEver);
+                
+                // 2. ПОЛУЧАЕМ ТЕКУЩИЕ ГРАНИЦЫ И ЗУМ
+                ImPlotRect limits = ImPlot::GetPlotLimits();
+                
+                // Считаем зум динамически
+                int zoom = 15; // по умолчанию
+                double width = std::abs(limits.X.Max - limits.X.Min);
+                if (width > 0) {
+                    zoom = (int)std::floor(std::log2(360.0 / width*2)); //360 - так как ширина делится на 360 градусов делим на текушую ширину окна и преминеям логарифм и получим то сколько тайлов надо взять
+                    if (zoom < 1) zoom = 1;
+                    if (zoom > 18) zoom = 18;
+                }
+
+
+
+                // Лимит текстур (500 штук ~ 130-150 Мб видеопамяти)
+                if (tile_cache.size() > 500) {
+                    std::cout << "[MEM] Cleaning Up GPU memory..." << std::endl;
+                    for (auto const& [path, texID] : tile_cache) {
+                        if (texID > 0) {
+                            GLuint id = texID;
+                            glDeleteTextures(1, &id); // Освобождаем память в видеокарте
+                        }
+                    }
+                    tile_cache.clear(); // Чистим сам список
+                }
+
+                // 3. РАСЧЕТ ТАЙЛОВ
+                if (limits.X.Min > -180 && limits.X.Max < 180) { //проверка от дурака чтоб ничего не падало если улетим за границы карты
+                    
+                    //считаем диапозоны для видимых в данный момент тайлов
+                    int x_start = (int)std::floor(lon2tile(limits.X.Min, zoom));
+                    int x_end   = (int)std::floor(lon2tile(limits.X.Max, zoom));
+                    int y_start = (int)std::floor(lat2tile(limits.Y.Max, zoom)); 
+                    int y_end   = (int)std::floor(lat2tile(limits.Y.Min, zoom));
+
+                    // Рисуем, если область не слишком огромная (защита от лагов)
+                    if (std::abs(x_end - x_start) < 20 && std::abs(y_end - y_start) < 20) { //если количесто тайлов в камере огромное то скипаем отрисовку (число 20 на вскидку выбрано)
+                        for (int x = x_start; x <= x_end; ++x) {
+                            for (int y = y_start; y <= y_end; ++y) {
+                                std::string path = "tiles/" + std::to_string(zoom) + "/" + std::to_string(x) + "/" + std::to_string(y) + ".png";// путь для запроса
+
+                                GLuint texID = 0; //айди картинки в видеопамяти для отрисовки (0 - пусто) в моем случае еще промежуточное состояние скачки
+
+                                // ПРОВЕРКА КЭША И ДИСКА
+                                if (tile_cache.count(path)) {
+                                    texID = tile_cache[path];
+                                    
+                                    // Если в кэше 0 (значит раньше файла не было), проверим - вдруг докачался?
+                                    if (texID == 0 && std::filesystem::exists(path)) {
+                                        texID = LoadTexture(path.c_str());
+                                        tile_cache[path] = texID;
+                                    }
+                                } 
+                                else {
+                                    // Если вообще не знаем про такой тайл
+                                    if (std::filesystem::exists(path)) {
+                                        texID = LoadTexture(path.c_str());
+                                        tile_cache[path] = texID;
+                                    } else {
+                                        // Файла нет - ставим метку 0 и запускаем поток на скачку
+                                        tile_cache[path] = 0;
+                                        std::thread(thread_loader, zoom, x, y).detach(); ///нам не нужно ожидать его завершения это будет тормозить основной поток пусть работает в фоне и экранируем на всякий 
+                                    }
+                                }
+
+                                // ОТРИСОВКА ТАЙЛА
+                                if (texID > 0) {
+                                    double l_lon = tilex2lon(x, zoom);
+                                    double r_lon = tilex2lon(x + 1, zoom);
+                                    double t_lat = tiley2lat(y, zoom);
+                                    double b_lat = tiley2lat(y + 1, zoom);
+                                    
+                                    // ImPlotPoint(X_min, Y_min), ImPlotPoint(X_max, Y_max)
+                                    ImPlot::PlotImage(path.c_str(), (void*)(intptr_t)texID, 
+                                                    ImPlotPoint(l_lon, b_lat), 
+                                                    ImPlotPoint(r_lon, t_lat));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 4. ТРЕК (Красная линия поверх карты)
+                std::lock_guard<std::mutex> lock(data_mutex); //мьютим чтобы не было гонки потоков
+                if (!plot_lats.empty()) {
+                    ImPlot::SetNextLineStyle(ImVec4(1, 0, 0, 1), 3.0f); //параметры линнии
+                    ImPlot::PlotLine("My Track", plot_lons.data(), plot_lats.data(), (int)plot_lons.size());//массив долготы, широты, кол-во точек
+                }
+
+                ImPlot::EndPlot();
+            }
+        }
+        ImGui::End();
 
         // Рендеринг
         ImGui::Render();
@@ -227,7 +369,6 @@ void runGui() {
         glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        
         SDL_GL_SwapWindow(window);
     }
 
@@ -236,7 +377,6 @@ void runGui() {
     ImGui_ImplSDL3_Shutdown();
     ImPlot::DestroyContext();
     ImGui::DestroyContext();
-    
     SDL_GL_DestroyContext(gl_context);
     SDL_DestroyWindow(window);
     SDL_Quit();
@@ -358,7 +498,8 @@ void run_server(){
 
 int main(int argc, char *argv[]) {
 
-    
+    auto r = cpr::Get(cpr::Url{"https://api.github.com/repos/libcpr/cpr"});
+    std::cout << r.status_code << std::endl;
 
     // Запускаем сервер в фоновом потоке
     std::thread server_t(run_server); 
