@@ -62,6 +62,9 @@ std::string make_grid_key(double lat, double lon) { // генерируем кл
 
 std::vector<double> plot_lats;
 std::vector<double> plot_lons;
+std::vector<double> plot_rsrp; 
+std::vector<double> gps_lats, gps_lons;
+std::vector<double> net_lats, net_lons, net_rsrp;
 std::mutex data_mutex;
 
 void refresh_plot_data() {
@@ -69,20 +72,32 @@ void refresh_plot_data() {
         pqxx::connection conn("dbname=location_db user=fel0ne password=123");
         pqxx::read_transaction R(conn);
         
-        // Берем последние 1000 точек
-        auto rows = R.exec("SELECT latitude, longitude FROM location_history ORDER BY id ASC LIMIT 1000");
-        
+        auto rows = R.exec(R"(
+            SELECT lh.latitude, lh.longitude, lh.provider, cd.signal_strength 
+            FROM location_history lh
+            LEFT JOIN cellular_data cd ON lh.id = cd.location_id
+            ORDER BY lh.id ASC
+        )");
+
         std::lock_guard<std::mutex> lock(data_mutex);
-        plot_lats.clear();
-        plot_lons.clear();
-        
+        gps_lats.clear(); gps_lons.clear();
+        net_lats.clear(); net_lons.clear(); net_rsrp.clear();
+
         for (auto row : rows) {
-            plot_lats.push_back(row[0].as<double>());
-            plot_lons.push_back(row[1].as<double>());
+            std::string provider = row[2].as<std::string>();
+            double lat = row[0].as<double>();
+            double lon = row[1].as<double>();
+
+            if (provider == "gps") {
+                gps_lats.push_back(lat);
+                gps_lons.push_back(lon);
+            } else {
+                net_lats.push_back(lat);
+                net_lons.push_back(lon);
+                net_rsrp.push_back(row[3].is_null() ? -120.0 : row[3].as<double>());
+            }
         }
-    } catch (const std::exception &e) {
-        std::cerr << "Fetch error: " << e.what() << std::endl;
-    }
+    } catch (...) {}
 }
 
 // долгота в X тайла
@@ -318,30 +333,24 @@ void run_server(){
 
 
 
-void run_host(){
-    
+void run_host() {
     try {
-        // 1. Подключаемся к дефолтной базе 'postgres'
-        pqxx::connection temp_conn(" dbname=postgres user=fel0ne password=123");
+        // 1. Подключаемся к дефолтной базе 'postgres' для проверки существования location_db
+        pqxx::connection temp_conn("dbname=postgres user=fel0ne password=123");
         pqxx::nontransaction N(temp_conn);
 
-        // 2. Проверяем, существует ли наша база
-        pqxx::result r = N.exec_params(
-            "SELECT 1 FROM pg_database WHERE datname = $1", 
-            "location_db"
-        );
+        pqxx::result r = N.exec_params("SELECT 1 FROM pg_database WHERE datname = $1", "location_db");
 
         if (r.empty()) {
             std::cout << "Database 'location_db' not found. Creating..." << std::endl;
-            // CREATE DATABASE нельзя запускать в транзакции, поэтому используем nontransaction
             N.exec("CREATE DATABASE location_db");
         }
-        temp_conn.close(); // Закрываем временное соединение
+        temp_conn.close();
 
-        // 3. Теперь подключаемся уже к нашей базе и создаем таблицу
-        pqxx::connection conn(" dbname=location_db user=fel0ne password=123");
-        pqxx::work W(conn);
-        W.exec(R"(
+        // 2. Инициализация таблиц
+        pqxx::connection conn_init("dbname=location_db user=fel0ne password=123");
+        pqxx::work W_init(conn_init);
+        W_init.exec(R"(
             CREATE TABLE IF NOT EXISTS location_history (
                 id SERIAL PRIMARY KEY,
                 latitude DOUBLE PRECISION NOT NULL,
@@ -356,48 +365,54 @@ void run_host(){
             CREATE TABLE IF NOT EXISTS cellular_data (
                 id SERIAL PRIMARY KEY,
                 location_id INTEGER REFERENCES location_history(id) ON DELETE CASCADE,
-                network_type VARCHAR(10), -- LTE, GSM, NR
-                cell_id BIGINT,           -- CI или NCI
+                network_type VARCHAR(10),
+                cell_id BIGINT,
                 mcc VARCHAR(5),
                 mnc VARCHAR(5),
-                signal_strength REAL,      -- RSRP или dbm
+                signal_strength REAL,
+                extra_data JSONB,
                 UNIQUE(location_id, network_type)
             );
         )");
-        W.commit();
+        W_init.commit();
         std::cout << "Database and Table are ready!" << std::endl;
 
     } catch (const std::exception &e) {
         std::cerr << "Setup error: " << e.what() << std::endl;
+        return; // Если база не настроилась, дальше идти нет смысла
     }
 
-
+    // 3. Настройка ZMQ
     std::string full_address = "tcp://" + connect_IP + ":5556";
-    zmq::context_t context(1); //количество потоков обрабатывающих все сокеты
-    zmq::socket_t socket(context, zmq::socket_type::pull); //создае сокет
-    socket.connect(full_address);//привязываем сокет, скорее порт т.к. *  говорит о том что в последствии будем слушать все адреса
-    pqxx::connection conn(" dbname=location_db user=fel0ne password=123");
-    while(true){
-        std::string message_str; 
-        
-        zmq::message_t message;
-        socket.recv(&message);  //получение данных
-        message_str = std::string(static_cast<char*>(message.data()), message.size()); //преобразуем в строку сообщениие, кастуем в чар чтобы избавится от указателя на пустоту
-        std::cerr << "data gived"<< message_str<<std::endl<<std::endl;
-        //===================TEST=======================
-        //message_str = R"({"accuracy":18.5,"latitude":55.04407833333333,"longitude":82.98355500000001,"provider":"gps","recordedTime":1763312279272,"source":"Кэш","timestamp":1763215517000})";
-        //==============================================
-        
+    zmq::context_t context(1);
+    zmq::socket_t socket(context, zmq::socket_type::pull);
+    
+    try {
+        socket.connect(full_address);
+    } catch (const zmq::error_t& e) {
+        std::cerr << "ZMQ Connect error: " << e.what() << std::endl;
+        return;
+    }
 
-        
-        auto json = nlohmann::json::parse(message_str);
+    pqxx::connection conn("dbname=location_db user=fel0ne password=123");
 
+    // 4. Основной цикл приема данных
+    while(true) {
         try {
+            zmq::message_t message;
+            auto res = socket.recv(message, zmq::recv_flags::none);
+            if (message.size() == 0) continue;
+
+            std::string message_str = std::string(static_cast<char*>(message.data()), message.size());
+            std::cerr << "Data received: " << message_str << std::endl;
+
+            auto json = nlohmann::json::parse(message_str);
+            
+            // Начинаем транзакцию для записи
             pqxx::work W(conn);
             std::string grid_key = make_grid_key(json["latitude"], json["longitude"]);
 
-            // 1. Сохраняем локацию и получаем ID вставленной строки
-            pqxx::result res = W.exec_params(
+            pqxx::result res_db = W.exec_params(
                 R"(INSERT INTO location_history 
                 (latitude, longitude, accuracy, provider, source, recorded_time, event_timestamp, grid_key) 
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
@@ -418,23 +433,20 @@ void run_host(){
                 grid_key
             );
 
-            int location_id = res[0][0].as<int>();
+            int location_id = res_db[0][0].as<int>();
 
-            // 2. Если есть данные о сотах — парсим их
             if (json.contains("telephony") && json["telephony"].is_object()) {
                 auto tel = json["telephony"];
-                
                 for (auto& [type, content] : tel.items()) {
                     long long cid = 0;
                     float signal = 0.0f;
-                    std::string mcc = "0";
-                    std::string mnc = "0";
+                    std::string mcc = "0", mnc = "0";
+                    nlohmann::json extra = content;
 
                     if (content.contains("identity")) {
                         auto id_obj = content["identity"];
                         mcc = id_obj.value("mcc", "0");
                         mnc = id_obj.value("mnc", "0");
-
                         if (type == "LTE") cid = id_obj.value("ci", 0LL);
                         else if (type == "NR_5G") cid = id_obj.value("nci", 0LL);
                         else if (type == "GSM") cid = id_obj.value("cid", 0LL);
@@ -447,28 +459,31 @@ void run_host(){
                         else if (type == "NR_5G") signal = sig_obj.value("ss_rsrp", 0.0f);
                     }
 
-                    // Для cellular_data тоже можно сделать UPSERT, чтобы не плодить дубли сигналов для одной локации
                     W.exec_params(
-                        R"(INSERT INTO cellular_data (location_id, network_type, cell_id, mcc, mnc, signal_strength) 
-                        VALUES ($1, $2, $3, $4, $5, $6)
+                        R"(INSERT INTO cellular_data (location_id, network_type, cell_id, mcc, mnc, signal_strength, extra_data) 
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
                         ON CONFLICT (location_id, network_type) DO UPDATE SET 
-                        signal_strength = EXCLUDED.signal_strength,
-                        cell_id = EXCLUDED.cell_id;)",
-                        location_id, type, cid, mcc, mnc, signal
+                        extra_data = EXCLUDED.extra_data,
+                        signal_strength = EXCLUDED.signal_strength;)",
+                        location_id, type, cid, mcc, mnc, signal, extra.dump() 
                     );
                 }
             }
 
+            W.commit(); // Завершаем транзакцию
+            std::cout << "[SERVER] Data saved, refreshing GUI..." << std::endl;
+            
+            // Обновляем данные для графиков
+            refresh_plot_data();
 
-                W.commit();
-
-                    } catch (const std::exception &e) {
-
-                    std::cerr << "[DB Error] " << e.what() << std::endl;
-
-                }
-    
-    
+        } catch (const nlohmann::json::parse_error& e) {
+            std::cerr << "[JSON ERROR] " << e.what() << std::endl;
+        } catch (const zmq::error_t& e) {
+            std::cerr << "[ZMQ ERROR] " << e.what() << std::endl;
+            // Если ошибка серьезная (например, прервано соединение), можно выйти или попробовать переподключиться
+        } catch (const std::exception& e) {
+            std::cerr << "[RUNTIME ERROR] " << e.what() << std::endl;
+        }
     }
 }
 
@@ -524,20 +539,7 @@ void runGui() {
         ImGui::NewFrame();
 
 
-        // if (ImGui::BeginTabBar("Tabs")){  
-        //     if (ImGui::BeginTabItem("Основная вкладка")){ 
         
-        //         ImGui::EndTabItem() ;
-        //     }
-        //     ImGui::End();
-        //     if (ImGui::BeginTabItem("Пустая вкладка")){ 
-        
-        //         ImGui::EndTabItem() ;
-        //     }
-        //     ImGui::End();
-        //     ImGui::EndTabBar() ;
-        // }
-        // ImGui::End();
 
         // --- ЛЕВАЯ ПАНЕЛЬ ---
         ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -594,6 +596,11 @@ void runGui() {
         ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x * 0.8f, io.DisplaySize.y));
         ImGui::Begin("Map View", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
         {
+
+        if (ImGui::BeginTabBar("Tabs")){  
+            if (ImGui::BeginTabItem("MAP")){ 
+        
+                 
             if (ImPlot::BeginPlot("##MainMap", ImVec2(-1, -1), ImPlotFlags_Equal | ImPlotFlags_NoLegend)) {
                 
                 // 1. НАСТРОЙКА ОСЕЙ (Сначала это!)
@@ -683,16 +690,106 @@ void runGui() {
                 }
 
                 // 4. ТРЕК (Красная линия поверх карты)
-                std::lock_guard<std::mutex> lock(data_mutex); //мьютим чтобы не было гонки потоков
-                if (!plot_lats.empty()) {
-                    ImPlot::SetNextLineStyle(ImVec4(1, 0, 0, 1), 3.0f); //параметры линнии
-                    ImPlot::PlotLine("My Track", plot_lons.data(), plot_lats.data(), (int)plot_lons.size());//массив долготы, широты, кол-во точек
+                std::lock_guard<std::mutex> lock(data_mutex);
+
+                // 1. Рисуем синюю линию (GPS)
+                if (!gps_lats.empty()) {
+                    ImPlot::SetNextLineStyle(ImVec4(0.2f, 0.4f, 1.0f, 1.0f), 2.0f); // Синий
+                    ImPlot::PlotLine("GPS Path", gps_lons.data(), gps_lats.data(), (int)gps_lats.size());
                 }
 
+                // 2. Рисуем красную линию (Network) и круги покрытия
+                if (!net_lats.empty()) {
+                    ImPlot::SetNextLineStyle(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), 2.0f); // Красный
+                    ImPlot::PlotLine("Network Path", net_lons.data(), net_lats.data(), (int)net_lats.size());
+
+                    // Рисуем круги для каждой точки Network
+                    for (size_t i = 0; i < net_lats.size(); ++i) {
+                        // Рассчитываем радиус в градусах координат (очень грубо: 0.001 ~ 111 метров)
+                        // Чем лучше сигнал (например -70), тем меньше радиус. Чем хуже (-110), тем больше.
+                        double rsrp = net_rsrp[i];
+                        double radius = (std::abs(rsrp) - 40.0) * 0.00005; // Коэффициент подбери под масштаб
+
+                        if (radius > 0) {
+                            // Преобразуем координаты GPS в пиксели на экране внутри графика
+                            ImVec2 pos = ImPlot::PlotToPixels(ImPlotPoint(net_lons[i], net_lats[i]));
+                            // Преобразуем радиус из координат в пиксели (грубо)
+                            float r_pixels = ImPlot::PlotToPixels(ImPlotPoint(net_lons[i] + radius, net_lats[i])).x - pos.x;
+
+                            // Рисуем круг в DrawList
+                            ImPlot::GetPlotDrawList()->AddCircleFilled(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 50));
+                            ImPlot::GetPlotDrawList()->AddCircle(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 150));
+                        }
+                    }
+                }
                 ImPlot::EndPlot();
             }
+        
+        ImGui::EndTabItem() ;
+            }
+            if (ImGui::BeginTabItem("GRAPHS")){ 
+               std::lock_guard<std::mutex> lock(data_mutex);
+                
+                if (ImGui::BeginTable("GraphsTable", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInner)) {
+                    ImGui::TableNextRow();
+                    
+                    // 1. Линейный график RSRP
+                    ImGui::TableSetColumnIndex(0);
+                    if (ImPlot::BeginPlot("LTE RSRP History", ImVec2(-1, 300))) {
+                        ImPlot::SetupAxes("Index", "dBm");
+                        ImPlot::SetupAxesLimits(0, 1000, -140, -40, ImGuiCond_FirstUseEver);
+                        if (!plot_rsrp.empty()) {
+                            ImPlot::SetNextFillStyle(ImVec4(0, 1, 0, 1), 0.25f);
+                            // Рисуем закрашенную область
+                            ImPlot::PlotShaded("RSRP Area", plot_rsrp.data(), (int)plot_rsrp.size(), -140);
+                            ImPlot::PlotLine("RSRP", plot_rsrp.data(), (int)plot_rsrp.size());
+                        }
+                        ImPlot::EndPlot();
+                    }
+
+                    // 2. Полярный график (Ручной пересчет)
+                    ImGui::TableSetColumnIndex(1);
+                    if (ImPlot::BeginPlot("Signal Azimuth", ImVec2(-1, 300), ImPlotFlags_Equal)) {
+                        ImPlot::SetupAxes(nullptr, nullptr, ImPlotAxisFlags_NoGridLines | ImPlotAxisFlags_NoTickLabels);
+                        
+                        static float polar_x[360], polar_y[360];
+                        for (int i = 0; i < 360; ++i) { 
+                            float angle = i * (float)M_PI / 180.0f;
+                            float mag = 0.5f + 0.5f * sinf(i * 0.05f); 
+                            polar_x[i] = mag * cosf(angle); // X = R * cos(A)
+                            polar_y[i] = mag * sinf(angle); // Y = R * sin(A)
+                        }
+                        ImPlot::PlotLine("Directional Gain", polar_x, polar_y, 360);
+                        ImPlot::EndPlot();
+                    }
+
+                    ImGui::TableNextRow();
+
+                    // 3. Тепловая карта (Heatmap)
+                    ImGui::TableSetColumnIndex(0);
+                    if (ImPlot::BeginPlot("Signal Density Heatmap", ImVec2(-1, 300))) {
+                        static float heatmap_data[400]; 
+                        for (int i = 0; i < 400; ++i) heatmap_data[i] = (float)(i % 20) / 20.0f;
+                        ImPlot::PlotHeatmap("Cell Density", heatmap_data, 20, 20, 0, 1);
+                        ImPlot::EndPlot();
+                    }
+
+                    // 4. SNR (Простая синусоида для примера 3D-поверхности)
+                    ImGui::TableSetColumnIndex(1);
+                    if (ImPlot::BeginPlot("Quality Metrics", ImVec2(-1, 300))) {
+                        static float bars_data[10] = {1, 2, 4, 8, 16, 8, 4, 2, 1, 5};
+                        ImPlot::PlotBars("SNR Levels", bars_data, 10);
+                        ImPlot::EndPlot();
+                    }
+
+                    ImGui::EndTable();
+                }
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar() ;
         }
         ImGui::End();
+        }
 
         // Рендеринг
         ImGui::Render();
@@ -701,8 +798,8 @@ void runGui() {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
+    
     }
-
     // Очистка
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
