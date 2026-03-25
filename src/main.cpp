@@ -525,6 +525,9 @@ void runGui() {
 
     bool running = true;
     bool mode = true; 
+    bool radius_btn = false;
+    bool gps_line_btn = false;
+    bool network_line_btn = true;
     static std::map<std::string, GLuint> tile_cache; // база данных типо которая построена нв контейнере ключ-значение придется чистить переодически все тайлы в видеокарту не влезут
 
     while (running) {
@@ -578,6 +581,20 @@ void runGui() {
                 mode = !mode;
             }
 
+
+            if (ImGui::Button("View circles", ImVec2(-1, 30))) {
+                radius_btn = !radius_btn;
+            }
+
+            if (ImGui::Button("View gps line", ImVec2(-1, 30))) {
+                gps_line_btn = !gps_line_btn;
+            }
+
+            if (ImGui::Button("View network line", ImVec2(-1, 30))) {
+                network_line_btn = !network_line_btn;
+            }
+
+            
             ImGui::Separator();
             ImGui::Text("Last Log:");
             ImGui::BeginChild("LogRegion", ImVec2(0, 200), true);
@@ -693,32 +710,33 @@ void runGui() {
                 std::lock_guard<std::mutex> lock(data_mutex);
 
                 // 1. Рисуем синюю линию (GPS)
-                if (!gps_lats.empty()) {
+                if (!gps_lats.empty() && gps_line_btn == true) {
                     ImPlot::SetNextLineStyle(ImVec4(0.2f, 0.4f, 1.0f, 1.0f), 2.0f); // Синий
                     ImPlot::PlotLine("GPS Path", gps_lons.data(), gps_lats.data(), (int)gps_lats.size());
                 }
 
                 // 2. Рисуем красную линию (Network) и круги покрытия
-                if (!net_lats.empty()) {
+                if (!net_lats.empty() && network_line_btn == true) {
                     ImPlot::SetNextLineStyle(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), 2.0f); // Красный
                     ImPlot::PlotLine("Network Path", net_lons.data(), net_lats.data(), (int)net_lats.size());
-
+                    if(radius_btn == true){
                     // Рисуем круги для каждой точки Network
-                    for (size_t i = 0; i < net_lats.size(); ++i) {
-                        // Рассчитываем радиус в градусах координат (очень грубо: 0.001 ~ 111 метров)
-                        // Чем лучше сигнал (например -70), тем меньше радиус. Чем хуже (-110), тем больше.
-                        double rsrp = net_rsrp[i];
-                        double radius = (std::abs(rsrp) - 40.0) * 0.00005; // Коэффициент подбери под масштаб
+                        for (size_t i = 0; i < net_lats.size(); ++i) {
+                            // Рассчитываем радиус в градусах координат (очень грубо: 0.001 ~ 111 метров)
+                            // Чем лучше сигнал (например -70), тем меньше радиус. Чем хуже (-110), тем больше.
+                            double rsrp = net_rsrp[i];
+                            double radius = (std::abs(rsrp) - 40.0) * 0.00005; // Коэффициент подбери под масштаб
 
-                        if (radius > 0) {
-                            // Преобразуем координаты GPS в пиксели на экране внутри графика
-                            ImVec2 pos = ImPlot::PlotToPixels(ImPlotPoint(net_lons[i], net_lats[i]));
-                            // Преобразуем радиус из координат в пиксели (грубо)
-                            float r_pixels = ImPlot::PlotToPixels(ImPlotPoint(net_lons[i] + radius, net_lats[i])).x - pos.x;
+                            if (radius > 0) {
+                                // Преобразуем координаты GPS в пиксели на экране внутри графика
+                                ImVec2 pos = ImPlot::PlotToPixels(ImPlotPoint(net_lons[i], net_lats[i]));
+                                // Преобразуем радиус из координат в пиксели (грубо)
+                                float r_pixels = ImPlot::PlotToPixels(ImPlotPoint(net_lons[i] + radius, net_lats[i])).x - pos.x;
 
-                            // Рисуем круг в DrawList
-                            ImPlot::GetPlotDrawList()->AddCircleFilled(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 50));
-                            ImPlot::GetPlotDrawList()->AddCircle(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 150));
+                                // Рисуем круг в DrawList
+                                ImPlot::GetPlotDrawList()->AddCircleFilled(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 50));
+                                ImPlot::GetPlotDrawList()->AddCircle(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 150));
+                            }
                         }
                     }
                 }
@@ -730,6 +748,7 @@ void runGui() {
             if (ImGui::BeginTabItem("GRAPHS")){ 
                std::lock_guard<std::mutex> lock(data_mutex);
                 
+                
                 if (ImGui::BeginTable("GraphsTable", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInner)) {
                     ImGui::TableNextRow();
                     
@@ -738,11 +757,11 @@ void runGui() {
                     if (ImPlot::BeginPlot("LTE RSRP History", ImVec2(-1, 300))) {
                         ImPlot::SetupAxes("Index", "dBm");
                         ImPlot::SetupAxesLimits(0, 1000, -140, -40, ImGuiCond_FirstUseEver);
-                        if (!plot_rsrp.empty()) {
+                        if (!net_rsrp.empty()) {
                             ImPlot::SetNextFillStyle(ImVec4(0, 1, 0, 1), 0.25f);
                             // Рисуем закрашенную область
-                            ImPlot::PlotShaded("RSRP Area", plot_rsrp.data(), (int)plot_rsrp.size(), -140);
-                            ImPlot::PlotLine("RSRP", plot_rsrp.data(), (int)plot_rsrp.size());
+                            ImPlot::PlotShaded("RSRP Area", net_rsrp.data(), (int)net_rsrp.size(), -140);
+                            ImPlot::PlotLine("RSRP", net_rsrp.data(), (int)net_rsrp.size());
                         }
                         ImPlot::EndPlot();
                     }
