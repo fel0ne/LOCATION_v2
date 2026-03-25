@@ -725,16 +725,16 @@ void runGui() {
                             // Рассчитываем радиус в градусах координат (очень грубо: 0.001 ~ 111 метров)
                             // Чем лучше сигнал (например -70), тем меньше радиус. Чем хуже (-110), тем больше.
                             double rsrp = net_rsrp[i];
-                            double radius = (std::abs(rsrp) - 40.0) * 0.00005; // Коэффициент подбери под масштаб
+                            double radius = (std::abs(rsrp) - 40.0) * 0.00005; 
 
                             if (radius > 0) {
                                 // Преобразуем координаты GPS в пиксели на экране внутри графика
                                 ImVec2 pos = ImPlot::PlotToPixels(ImPlotPoint(net_lons[i], net_lats[i]));
-                                // Преобразуем радиус из координат в пиксели (грубо)
+                                // Преобразуем радиус из координат в пиксели 
                                 float r_pixels = ImPlot::PlotToPixels(ImPlotPoint(net_lons[i] + radius, net_lats[i])).x - pos.x;
 
                                 // Рисуем круг в DrawList
-                                ImPlot::GetPlotDrawList()->AddCircleFilled(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 50));
+                                ImPlot::GetPlotDrawList()->AddCircleFilled(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 5));
                                 ImPlot::GetPlotDrawList()->AddCircle(pos, std::abs(r_pixels), IM_COL32(255, 0, 0, 150));
                             }
                         }
@@ -749,12 +749,11 @@ void runGui() {
                std::lock_guard<std::mutex> lock(data_mutex);
                 
                 
-                if (ImGui::BeginTable("GraphsTable", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInner)) {
-                    ImGui::TableNextRow();
+              
                     
                     // 1. Линейный график RSRP
-                    ImGui::TableSetColumnIndex(0);
-                    if (ImPlot::BeginPlot("LTE RSRP History", ImVec2(-1, 300))) {
+                  
+                    if (ImPlot::BeginPlot("LTE RSRP History", ImVec2(-1, -1))) {
                         ImPlot::SetupAxes("Index", "dBm");
                         ImPlot::SetupAxesLimits(0, 1000, -140, -40, ImGuiCond_FirstUseEver);
                         if (!net_rsrp.empty()) {
@@ -766,43 +765,10 @@ void runGui() {
                         ImPlot::EndPlot();
                     }
 
-                    // 2. Полярный график (Ручной пересчет)
-                    ImGui::TableSetColumnIndex(1);
-                    if (ImPlot::BeginPlot("Signal Azimuth", ImVec2(-1, 300), ImPlotFlags_Equal)) {
-                        ImPlot::SetupAxes(nullptr, nullptr, ImPlotAxisFlags_NoGridLines | ImPlotAxisFlags_NoTickLabels);
-                        
-                        static float polar_x[360], polar_y[360];
-                        for (int i = 0; i < 360; ++i) { 
-                            float angle = i * (float)M_PI / 180.0f;
-                            float mag = 0.5f + 0.5f * sinf(i * 0.05f); 
-                            polar_x[i] = mag * cosf(angle); // X = R * cos(A)
-                            polar_y[i] = mag * sinf(angle); // Y = R * sin(A)
-                        }
-                        ImPlot::PlotLine("Directional Gain", polar_x, polar_y, 360);
-                        ImPlot::EndPlot();
-                    }
+                    
 
-                    ImGui::TableNextRow();
-
-                    // 3. Тепловая карта (Heatmap)
-                    ImGui::TableSetColumnIndex(0);
-                    if (ImPlot::BeginPlot("Signal Density Heatmap", ImVec2(-1, 300))) {
-                        static float heatmap_data[400]; 
-                        for (int i = 0; i < 400; ++i) heatmap_data[i] = (float)(i % 20) / 20.0f;
-                        ImPlot::PlotHeatmap("Cell Density", heatmap_data, 20, 20, 0, 1);
-                        ImPlot::EndPlot();
-                    }
-
-                    // 4. SNR (Простая синусоида для примера 3D-поверхности)
-                    ImGui::TableSetColumnIndex(1);
-                    if (ImPlot::BeginPlot("Quality Metrics", ImVec2(-1, 300))) {
-                        static float bars_data[10] = {1, 2, 4, 8, 16, 8, 4, 2, 1, 5};
-                        ImPlot::PlotBars("SNR Levels", bars_data, 10);
-                        ImPlot::EndPlot();
-                    }
-
-                    ImGui::EndTable();
-                }
+                                    
+                
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar() ;
