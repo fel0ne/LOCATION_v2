@@ -3,4 +3,4 @@
 cmake -S . -B build
 
 # Собрать проект
-cmake --build build -j 8
+cmake --build build -j 6
