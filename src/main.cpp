@@ -22,7 +22,9 @@
 #include <pqxx/pqxx>
 
 #define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image.h"
+#include "stb_image_write.h"
 
 #include "backend/structs.cpp"
 #include "backend/consts.cpp"
@@ -37,21 +39,8 @@
 
 
 
- //загруает png тайлы как текстуру opengl
-
 
 int main(int argc, char *argv[]) {
-
-    auto r = cpr::Get(cpr::Url{"https://api.github.com/repos/libcpr/cpr"});
-    std::cout << r.status_code << std::endl;
-
-    // Запускаем сервер в фоновом потоке
-    // std::thread server_t(run_server); 
-    // server_t.detach(); // Пусть живет сам по себе
-
-    runGui(); // GUI запускаем строго в основном потоке
-
-
-
+    runGui(); 
     return 0;
 }

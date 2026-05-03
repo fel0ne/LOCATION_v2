@@ -64,8 +64,10 @@ void runGui() {
     bool radius_btn = false;
     bool gps_line_btn = false;
     bool network_line_btn = true;
+    bool heat_btn = false;
     static std::map<std::string, GLuint> tile_cache; // база данных типо которая построена нв контейнере ключ-значение придется чистить переодически все тайлы в видеокарту не влезут
-    
+    static std::map<std::string, GLuint> heatTile_cache;
+
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -126,6 +128,17 @@ void runGui() {
 
             if (ImGui::Button("Update Data", ImVec2(-1, 30))) { 
                 std::thread(refresh_plot_data).detach();
+                if (heatTile_cache.size() > 500) {
+                    std::cout << "[MEM] Cleaning Up GPU memory..." << std::endl;
+
+                    for (auto const& [heat_path, heat_texID] : heatTile_cache) {
+                        if (heat_texID > 0) {
+                            GLuint id = heat_texID;
+                            glDeleteTextures(1, &id); // Освобождаем память в видеокарте
+                        }
+                    }
+                    heatTile_cache.clear();
+                }
             }
             
             ImGui::SliderFloat("BS Height (hb)", &hb_slider, 10.0f, 100.0f, "%.1f m");
@@ -146,7 +159,9 @@ void runGui() {
             if (ImGui::Button("View network line", ImVec2(-1, 30))) {
                 network_line_btn = !network_line_btn;
             }
-
+            if (ImGui::Button("View heat map", ImVec2(-1, 30))) {
+                heat_btn = !heat_btn;
+            }
 
             
             ImGui::Separator();
@@ -201,8 +216,25 @@ void runGui() {
                             glDeleteTextures(1, &id); // Освобождаем память в видеокарте
                         }
                     }
+
                     tile_cache.clear(); // Чистим сам список
                 }
+
+
+                if (heatTile_cache.size() > 500) {
+                    std::cout << "[MEM] Cleaning Up GPU memory..." << std::endl;
+
+                    for (auto const& [heat_path, heat_texID] : heatTile_cache) {
+                        if (heat_texID > 0) {
+                            GLuint id = heat_texID;
+                            glDeleteTextures(1, &id); // Освобождаем память в видеокарте
+                        }
+                    }
+                    heatTile_cache.clear();
+                }
+
+
+
 
                 // 3. РАСЧЕТ ТАЙЛОВ
                 if (limits.X.Min > -180 && limits.X.Max < 180) { //проверка от дурака чтоб ничего не падало если улетим за границы карты
@@ -218,9 +250,9 @@ void runGui() {
                         for (int x = x_start; x <= x_end; ++x) {
                             for (int y = y_start; y <= y_end; ++y) {
                                 std::string path = "tiles/" + std::to_string(zoom) + "/" + std::to_string(x) + "/" + std::to_string(y) + ".png";// путь для запроса
-
+                                std::string heat_path = "heatTiles/" + std::to_string(zoom) + "/" + std::to_string(x) + "/" + std::to_string(y) + ".png";// путь для запроса
                                 GLuint texID = 0; //айди картинки в видеопамяти для отрисовки (0 - пусто) в моем случае еще промежуточное состояние скачки
-
+                                GLuint heat_texID = 0;
                                 // ПРОВЕРКА КЭША И ДИСКА
                                 if (tile_cache.count(path)) {
                                     texID = tile_cache[path];
@@ -243,6 +275,25 @@ void runGui() {
                                     }
                                 }
 
+                                if(heatTile_cache.count(heat_path)){
+                                    heat_texID = heatTile_cache[heat_path];
+                                    if(heat_texID == 0 && std::filesystem::exists(heat_path)){
+                                        heat_texID = LoadTexture(heat_path.c_str());
+                                        heatTile_cache[heat_path] = heat_texID;
+                                    }    
+                                }
+                                else{
+                                    if (std::filesystem::exists(heat_path)) {
+                                        heat_texID = LoadTexture(heat_path.c_str());
+                                        heatTile_cache[heat_path] = heat_texID;
+                                    } else {
+                                        // Файла нет - ставим метку 0 и запускаем поток на скачку
+                                        heatTile_cache[heat_path] = 0;
+                                        std::thread(generate_heat_map_tile, zoom, x, y).detach(); ///нам не нужно ожидать его завершения это будет тормозить основной поток пусть работает в фоне и экранируем на всякий 
+                                    }
+
+                                }
+
                                 // ОТРИСОВКА ТАЙЛА
                                 if (texID > 0) {
                                     double l_lon = tilex2lon(x, zoom);
@@ -254,6 +305,12 @@ void runGui() {
                                     ImPlot::PlotImage(path.c_str(), (void*)(intptr_t)texID, 
                                                     ImPlotPoint(l_lon, b_lat), 
                                                     ImPlotPoint(r_lon, t_lat));
+                                    if(heat_texID > 0 && heat_btn == true){
+                                        ImPlot::PlotImage(heat_path.c_str(), (void*)(intptr_t)heat_texID, 
+                                                    ImPlotPoint(l_lon, b_lat), 
+                                                    ImPlotPoint(r_lon, t_lat));
+
+                                    }
                                 }
                             }
                         }
@@ -288,8 +345,6 @@ void runGui() {
                     ImPlot::SetNextLineStyle(ImPlot::GetColormapColor((10 + color_offset) % ImPlot::GetColormapSize()), 5.0f);
                     ImPlot::PlotLine("GPS Active", &gps_lons[start_idx], &gps_lats[start_idx], (int)(gps_lats.size() - start_idx));
                 }
-
-                // 2. Рисуем красную линию (Network) и круги покрытия
                 // 2. Рисуем красную линию (Network)
                 if (network_line_btn) {
                     size_t start_idx = 0;

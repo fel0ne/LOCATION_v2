@@ -19,3 +19,7 @@ typedef struct {
     float f_dl_low;
     int n_offs_dl;
 } LteBandParams;
+
+struct Color {
+    unsigned char  r, g, b, a;
+};

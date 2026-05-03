@@ -52,10 +52,86 @@ void download_tile_cpr(int z, int x, int y) {
     }
 }
 
-void thread_loader(int z, int x, int y) {
-    download_tile_cpr(z, x, y);
+Color gradientColor(int ratio) {
+    // Ограничиваем диапазон 0-767
+    ratio = ratio % 768;
+
+    uint8_t r = 0, g = 0, b = 0;
+
+    if (ratio < 256) {
+        // Этап 1: Синий -> Голубой (B=255, G растет)
+        r = 0;
+        g = ratio;
+        b = 255;
+    } 
+    else if (ratio < 512) {
+        // Этап 2: Голубой -> Желтый (B падает, R растет)
+        int local = ratio - 256;
+        r = local;
+        g = 255;
+        b = 255 - local;
+    } 
+    else {
+        // Этап 3: Желтый -> Красный (G падает)
+        int local = ratio - 512;
+        r = 255;
+        g = 255 - local;
+        b = 0;
+    }
+
+    return Color(r, g, b, 125); // Альфа 125, как у вас
 }
 
+
+
+
+void generate_heat_map_tile(int z, int x, int y) {
+    int max_tile = (int)std::pow(2, z) - 1;
+    if (x < 0 || x > max_tile || y < 0 || y > max_tile) return;
+ 
+    std::string folder = "heatTiles/" + std::to_string(z) + "/" + std::to_string(x);
+    std::string path = folder + "/" + std::to_string(y) + ".png";
+ 
+    if (std::filesystem::exists(path)) return;
+    std::filesystem::create_directories(folder);
+ 
+    const int w = 256;
+    const int h = 256;
+    const int channels = 4;
+
+    int idx;
+    
+    Color current(0,0,0,0);
+ 
+    int weight = 0;
+   
+    std::vector<unsigned char> image(w * h * channels, 0);
+ 
+   
+    for (int py = 0; py < h; ++py) {
+        for (int px = 0; px < w; ++px) {
+                current = gradientColor(px*3);
+                idx = (py *w + px) * channels;
+
+                image[idx + 0] = current.r;
+                image[idx + 1] = current.g;
+                image[idx + 2] = current.b;
+                image[idx + 3] = current.a;            
+        }
+    }
+
+ 
+    // Всегда пишем файл — даже пустой, чтобы не перезапускать поток каждый кадр
+    stbi_write_png(path.c_str(), w, h, channels, image.data(), w * channels);
+    std::cout << "[HEAT] Tile written: " << path <<  std::endl;
+}
+ 
+
+
+void thread_loader(int z, int x, int y) {
+    download_tile_cpr(z, x, y);
+    generate_heat_map_tile(z,x,y);
+}
 GLuint LoadTexture(const char* filename) { // получаем путь к файлу 
     int width, height, channels; 
     stbi_set_flip_vertically_on_load(false); //говорим не переворачивать картинку
@@ -87,7 +163,11 @@ GLuint LoadTexture(const char* filename) { // получаем путь к фа�
 
 
 
+
+
 void refresh_plot_data() {
+
+    std::filesystem::remove_all("heatTiles/");
     try {
         pqxx::connection conn("dbname=location_db user=fel0ne password=123");
         pqxx::read_transaction R(conn);
@@ -189,7 +269,7 @@ void refresh_plot_data() {
                     //printf("Read: PCI=%d, Band=%d, Freq_idx=%d\n", pci_val, temp_band, temp_f);
                 } 
             }
-
+            
             // --- 2. ЛОГИКА ДЛЯ МУЛЬТИ-ГРАФИКА  ---
             if (!row[4].is_null()) {
                 try {
@@ -221,6 +301,7 @@ void refresh_plot_data() {
                     // Игнорируем битые JSON в БД
                     continue;
                 }
+
             }
             
         }
