@@ -11,6 +11,7 @@ std::vector<double> net_lats, net_lons, net_rsrp;
 std::vector<long long> net_times;
 std::vector<int> net_pcis;
 std::vector<long long> net_cis;
+std::vector<double> net_accuracies;
 
 std::map<int, std::vector<float>> pci_rsrp_map;
 std::vector<int> earfcn_for_circles;

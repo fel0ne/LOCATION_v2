@@ -92,14 +92,11 @@ void generate_heat_map_tile(int z, int x, int y, int filter_pci) {
     int max_tile = (int)std::pow(2, z) - 1;
     if (x < 0 || x > max_tile || y < 0 || y > max_tile) return;
 
-    // 1. ИСПРАВЛЕННЫЙ ПУТЬ: учитываем вложенность папок zoom/x/y
     std::string folder_base = (filter_pci == -1) ? "heatTiles/all/" : "heatTiles/pci_" + std::to_string(filter_pci) + "/";
     std::string full_folder_path = folder_base + std::to_string(z) + "/" + std::to_string(x) + "/";
     std::string path = full_folder_path + std::to_string(y) + ".png";
 
     if (std::filesystem::exists(path)) return;
-    
-    // Создаем всю цепочку директорий
     std::filesystem::create_directories(full_folder_path);
 
     const int w = 256;
@@ -107,64 +104,82 @@ void generate_heat_map_tile(int z, int x, int y, int filter_pci) {
     const int channels = 4;
     std::vector<unsigned char> image(w * h * channels, 0);
 
-    struct HeatPoint { double px, py; double rsrp; };
+    double lat_rad = tiley2lat(y, z) * M_PI / 180.0;
+    double meters_per_px = (156543.03392 * std::cos(lat_rad)) / std::pow(2, z);
+
+    const double background_rsrp = -110.0;
+
+    struct HeatPoint {
+        double px, py;
+        double rsrp;
+        double radius_px; // accuracy в метрах → пиксели на текущем зуме
+    };
     std::vector<HeatPoint> points;
 
     {
         std::lock_guard<std::mutex> lock(data_mutex);
         for (size_t i = 0; i < net_lats.size(); ++i) {
-            
-            // 2. ДОБАВЛЕНО: Фильтрация по PCI
-            // Если filter_pci != -1, берем только точки этого PCI
             if (filter_pci != -1 && net_pcis[i] != filter_pci) continue;
+
+            // Радиус из accuracy в метрах, минимум 10м чтобы точка была видна
+            double accuracy_m = (net_accuracies.size() > i) ? net_accuracies[i] : 20.0;
+            if (accuracy_m < 10.0) accuracy_m = 10.0;
+
+            double radius_px = accuracy_m / meters_per_px;
 
             double f_x = lon2tile(net_lons[i], z);
             double f_y = lat2tile(net_lats[i], z);
 
-            // Берем точки из текущего тайла + запас для плавности на краях
-            if (f_x >= x - 0.5 && f_x <= x + 1.5 && f_y >= y - 0.5 && f_y <= y + 1.5) {
-                points.push_back({ (f_x - x) * 256.0, (f_y - y) * 256.0, (double)net_rsrp[i] });
+            double tile_margin = radius_px / 256.0;
+
+            if (f_x >= x - tile_margin && f_x <= x + 1.0 + tile_margin &&
+                f_y >= y - tile_margin && f_y <= y + 1.0 + tile_margin) {
+                points.push_back({ (f_x - x) * 256.0, (f_y - y) * 256.0, (double)net_rsrp[i], radius_px });
             }
         }
     }
 
-    // Если для данного PCI в этой области нет данных - рисуем прозрачный или пустой тайл
     if (points.empty()) {
-        // Оставляем image заполненным нулями (полная прозрачность), 
-        // чтобы не перекрывать основную карту, если данных нет
         stbi_write_png(path.c_str(), w, h, channels, image.data(), w * channels);
         return;
     }
 
-    const double p = 4.0; 
-    
     for (int py = 0; py < h; ++py) {
         for (int px = 0; px < w; ++px) {
-            double sum_weighted_rsrp = 0.0;
-            double sum_weights = 0.0;
+
+            double sum_rsrp = 0.0;
+            double sum_w = 0.0;
+            double min_ratio = 1.0; // расстояние до ближайшей точки (0=центр, 1=край)
+            bool found = false;
 
             for (const auto& pt : points) {
                 double dx = px - pt.px;
                 double dy = py - pt.py;
-                double d2 = dx * dx + dy * dy;
+                double dist = std::sqrt(dx * dx + dy * dy);
 
-                if (d2 < 0.1) {
-                    sum_weighted_rsrp = pt.rsrp;
-                    sum_weights = 1.0;
-                    break;
-                }
+                if (dist > pt.radius_px) continue;
+                found = true;
 
-                double weight = 1.0 / std::pow(d2, p / 2.0);
-                sum_weights += weight;
-                sum_weighted_rsrp += pt.rsrp * weight;
+                double ratio = dist / pt.radius_px;
+
+                // Вес: ближе = сильнее влияет
+                double w = 1.0 - ratio;
+
+                sum_rsrp += pt.rsrp * w;
+                sum_w += w;
+
+                if (ratio < min_ratio) min_ratio = ratio;
             }
 
-            double background_rsrp = -110.0;
-            double background_weight = 0.00001; 
-            
-            double final_rsrp = (sum_weighted_rsrp + background_rsrp * background_weight) / (sum_weights + background_weight);
+            if (!found) continue;
 
-            double norm = (final_rsrp + 110.0) / 30.0; 
+            // Взвешенное среднее rsrp от всех точек в радиусе
+            double avg_rsrp = sum_rsrp / sum_w;
+
+            // Градиент: в центре ближайшей точки = avg_rsrp, к краю → background
+            double final_rsrp = avg_rsrp + (background_rsrp - avg_rsrp) * min_ratio;
+
+            double norm = (final_rsrp + 110.0) / 30.0;
             norm = std::clamp(norm, 0.0, 1.0);
 
             Color c = gradientColor((int)(norm * 767.0));
@@ -173,7 +188,7 @@ void generate_heat_map_tile(int z, int x, int y, int filter_pci) {
             image[idx + 0] = c.r;
             image[idx + 1] = c.g;
             image[idx + 2] = c.b;
-            image[idx + 3] = c.a; 
+            image[idx + 3] = c.a;
         }
     }
 
@@ -226,7 +241,7 @@ void refresh_plot_data() {
 
         // 1. ДОБАВЛЯЕМ recorded_time В SQL ЗАПРОС
         auto rows = R.exec(R"(
-            SELECT lh.latitude, lh.longitude, lh.provider, cd.signal_strength, cd.extra_data, lh.recorded_time 
+            SELECT lh.latitude, lh.longitude, lh.provider, cd.signal_strength, cd.extra_data, lh.recorded_time, lh.accuracy 
             FROM location_history lh
             LEFT JOIN cellular_data cd ON lh.id = cd.location_id
             WHERE lh.accuracy < 100
@@ -237,7 +252,7 @@ void refresh_plot_data() {
         
         // 2. ОЧИЩАЕМ ВЕКТОРЫ ВРЕМЕНИ (без этого отрисовка сломается)
         gps_lats.clear(); gps_lons.clear(); gps_times.clear();
-        net_lats.clear(); net_lons.clear(); net_rsrp.clear(); net_pcis.clear(); net_times.clear();
+        net_lats.clear(); net_lons.clear(); net_rsrp.clear(); net_pcis.clear(); net_times.clear(); net_accuracies.clear();
         pci_rsrp_map.clear(); 
         earfcn_for_circles.clear();
         band_for_circles.clear();
@@ -256,6 +271,9 @@ void refresh_plot_data() {
             
             // 3. ИНИЦИАЛИЗИРУЕМ r_time ИЗ 5-й КОЛОНКИ (lh.recorded_time)
             long long r_time = row[5].as<long long>();
+
+
+            double accuracy_val = row[6].is_null() ? 15.0 : row[6].as<double>();
 
             if (provider == "gps") {
                 bool is_valid = true;
@@ -294,7 +312,7 @@ void refresh_plot_data() {
                     net_lons.push_back(lon);
                     net_times.push_back(r_time); // И здесь тоже
                     net_rsrp.push_back((double)signal);
-                    
+                    net_accuracies.push_back(accuracy_val);
                     int pci_val = 0;
                     int temp_f = 0;
                     int temp_band = 0;
