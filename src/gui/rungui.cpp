@@ -161,7 +161,23 @@ void runGui() {
             }
             if (ImGui::Button("View heat map", ImVec2(-1, 30))) {
                 heat_btn = !heat_btn;
+                heatTile_cache.clear();
             }
+
+            ImGui::Separator();
+            ImGui::Text("Heatmap Filters");
+            
+            // Буфер для ввода PCI (пусто = "все")
+            static char pci_filter_buffer[16] = ""; 
+            if (ImGui::InputText("Filter PCI", pci_filter_buffer, IM_ARRAYSIZE(pci_filter_buffer), ImGuiInputTextFlags_CharsDecimal)) {
+                // Если текст изменился, можно сразу очистить кэш хитмапа, чтобы спровоцировать перерисовку
+                heatTile_cache.clear();
+            }
+            
+    
+
+            // Преобразуем буфер в число для передачи в логику отрисовки
+            target_pci = (strlen(pci_filter_buffer) > 0) ? std::atoi(pci_filter_buffer) : -1;
 
             
             ImGui::Separator();
@@ -250,7 +266,8 @@ void runGui() {
                         for (int x = x_start; x <= x_end; ++x) {
                             for (int y = y_start; y <= y_end; ++y) {
                                 std::string path = "tiles/" + std::to_string(zoom) + "/" + std::to_string(x) + "/" + std::to_string(y) + ".png";// путь для запроса
-                                std::string heat_path = "heatTiles/" + std::to_string(zoom) + "/" + std::to_string(x) + "/" + std::to_string(y) + ".png";// путь для запроса
+                                std::string heat_folder = (target_pci == -1) ? "heatTiles/all" : "heatTiles/pci_" + std::to_string(target_pci);
+                                std::string heat_path = heat_folder + "/" + std::to_string(zoom) + "/" + std::to_string(x) + "/" + std::to_string(y) + ".png";
                                 GLuint texID = 0; //айди картинки в видеопамяти для отрисовки (0 - пусто) в моем случае еще промежуточное состояние скачки
                                 GLuint heat_texID = 0;
                                 // ПРОВЕРКА КЭША И ДИСКА
@@ -287,9 +304,9 @@ void runGui() {
                                         heat_texID = LoadTexture(heat_path.c_str());
                                         heatTile_cache[heat_path] = heat_texID;
                                     } else {
-                                        // Файла нет - ставим метку 0 и запускаем поток на скачку
                                         heatTile_cache[heat_path] = 0;
-                                        std::thread(generate_heat_map_tile, zoom, x, y).detach(); ///нам не нужно ожидать его завершения это будет тормозить основной поток пусть работает в фоне и экранируем на всякий 
+                                        // Передаем target_pci в функцию генерации, чтобы она фильтровала данные из БД/памяти
+                                        std::thread(generate_heat_map_tile, zoom, x, y, target_pci).detach(); 
                                     }
 
                                 }
@@ -315,6 +332,8 @@ void runGui() {
                             }
                         }
                     }
+
+                    
                 }
 
                 // 4. ТРЕК (Красная линия поверх карты)
@@ -346,22 +365,49 @@ void runGui() {
                     ImPlot::PlotLine("GPS Active", &gps_lons[start_idx], &gps_lats[start_idx], (int)(gps_lats.size() - start_idx));
                 }
                 // 2. Рисуем красную линию (Network)
-                if (network_line_btn) {
+                if (network_line_btn && !net_lats.empty()) { // Добавлена проверка на пустоту
                     size_t start_idx = 0;
                     int net_color_offset = 0;
+                    int current_pci = net_pcis[0]; // PCI, который "сейчас" активен
 
                     for (size_t i = 1; i < net_lats.size(); ++i) {
+                        
+                        // 1. ПРОВЕРКА ХЕНДОВЕРА (PCI сменился?)
+
+                        if (net_pcis[i] != current_pci) {
+                            //std::string ho_label = "HO: " + std::to_string(current_pci) + " -> " + std::to_string(net_pcis[i]);
+                            
+                            // Рисуем маркер хендовера
+                            //ImPlot::SetNextMarkerStyle(ImPlotMarker_Cross, 10.0f, ImVec4(0, 0, 1, 1), 1.5f, ImVec4(1, 1, 1, 1));
+                            //ImPlot::PlotScatter(ho_label.c_str(), &net_lons[i], &net_lats[i], 1);
+                            
+                            HOS.push_back(HO(current_pci,net_pcis[i],net_lats[i],net_lons[i]));
+                            current_pci = net_pcis[i]; // Обновляем текущий PCI
+                        }
+
+                        // 2. ПРОВЕРКА РАЗРЫВА ТРЕКА (Прошел час?)
                         if (std::abs(net_times[i] - net_times[i - 1]) > 3600000) {
                             ImVec4 col = ImPlot::GetColormapColor(net_color_offset % ImPlot::GetColormapSize());
                             ImPlot::SetNextLineStyle(col, 5.0f);
-                            ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 6.0f);
-                            ImPlot::PlotLine(("Net Trip " + std::to_string(net_color_offset)).c_str(), 
-                                            &net_lons[start_idx], &net_lats[start_idx], (int)(i - start_idx));
+                            ImPlot::SetNextMarkerStyle(ImPlotMarker_Circle, 4.0f);
+                            
+                            std::string trip_label = "Net Trip " + std::to_string(net_color_offset);
+                            ImPlot::PlotLine(trip_label.c_str(), &net_lons[start_idx], &net_lats[start_idx], (int)(i - start_idx));
+                            
                             start_idx = i;
                             net_color_offset++;
                         }
                     }
-                    ImPlot::SetNextLineStyle(ImPlot::GetColormapColor(net_color_offset % ImPlot::GetColormapSize()), 5.0f);
+                    for(int i = 0; i < HOS.size(); i++){
+                        std::string ho_label = "HO: " + std::to_string(HOS[i].f_pci) + " -> " + std::to_string(HOS[i].s_pci);
+                        ImPlot::SetNextMarkerStyle(ImPlotMarker_Cross, 10.0f, ImVec4(0, 0, 1, 1), 1.5f, ImVec4(1, 1, 1, 1));
+                        ImPlot::PlotScatter(ho_label.c_str(), &HOS[i].lon, &HOS[i].lat, 1);
+
+                    }
+
+                    // 3. ОТРИСОВКА ПОСЛЕДНЕГО (АКТИВНОГО) СЕГМЕНТА
+                    ImVec4 last_col = ImPlot::GetColormapColor(net_color_offset % ImPlot::GetColormapSize());
+                    ImPlot::SetNextLineStyle(last_col, 5.0f);
                     ImPlot::PlotLine("Net Active", &net_lons[start_idx], &net_lats[start_idx], (int)(net_lats.size() - start_idx));
                 }
                 double radius_for_weight;
@@ -458,9 +504,46 @@ void runGui() {
                             ImPlot::PlotText(label.c_str(), best_lon, best_lat, ImVec2(0, 30));
                         }
                     }
+                if (heat_btn) {
+                    // Фиксируем позицию в левом верхнем углу области графика
+                    ImVec2 pos = ImPlot::GetPlotPos(); 
+                    pos.x += 10; 
+                    pos.y += 10;
+
+                    ImDrawList* draw_list = ImPlot::GetPlotDrawList(); // Используем DrawList именно графика
+
+                    // 1. Фон легенды
+                    ImVec2 l_size = ImVec2(80, 140);
+                    draw_list->AddRectFilled(pos, ImVec2(pos.x + l_size.x, pos.y + l_size.y), 
+                                            IM_COL32(30, 30, 30, 200), 10.0f);
+
+                    // 2. Отрисовка градиента (полоска)
+                    float bar_h = 100.0f;
+                    float bar_w = 15.0f;
+                    ImVec2 bar_pos = ImVec2(pos.x + 10, pos.y + 25);
+
+                    for (int i = 0; i < (int)bar_h; ++i) {
+                        float t = 1.0f - (float)i / bar_h; // Инверсия: красный вверху
+                        Color c = gradientColor((int)(t * 767));
+                        draw_list->AddLine(
+                            ImVec2(bar_pos.x, bar_pos.y + i),
+                            ImVec2(bar_pos.x + bar_w, bar_pos.y + i),
+                            IM_COL32(c.r, c.g, c.b, 255)
+                        );
+                    }
+
+                    // 3. Подписи
+                    draw_list->AddText(ImVec2(pos.x + 10, pos.y + 5), IM_COL32_WHITE, "RSRP");
+                    draw_list->AddText(ImVec2(bar_pos.x + bar_w + 5, bar_pos.y - 7), IM_COL32_WHITE, "-80");
+                    draw_list->AddText(ImVec2(bar_pos.x + bar_w + 5, bar_pos.y + bar_h / 2 - 7), IM_COL32_WHITE, "-95");
+                    draw_list->AddText(ImVec2(bar_pos.x + bar_w + 5, bar_pos.y + bar_h - 7), IM_COL32_WHITE, "-110");
                 }
+            }
                 
                 ImPlot::EndPlot();
+
+
+                
             }
         
         ImGui::EndTabItem() ;

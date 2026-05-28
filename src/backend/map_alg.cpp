@@ -56,13 +56,14 @@ Color gradientColor(int ratio) {
     // Ограничиваем диапазон 0-767
     ratio = ratio % 768;
 
-    uint8_t r = 0, g = 0, b = 0;
+    uint8_t r = 0, g = 0, b = 0, a = 0;
 
     if (ratio < 256) {
         // Этап 1: Синий -> Голубой (B=255, G растет)
         r = 0;
         g = ratio;
         b = 255;
+        a = ratio/2;
     } 
     else if (ratio < 512) {
         // Этап 2: Голубой -> Желтый (B падает, R растет)
@@ -70,6 +71,7 @@ Color gradientColor(int ratio) {
         r = local;
         g = 255;
         b = 255 - local;
+        a = 127;
     } 
     else {
         // Этап 3: Желтый -> Красный (G падает)
@@ -77,60 +79,109 @@ Color gradientColor(int ratio) {
         r = 255;
         g = 255 - local;
         b = 0;
+        a = 127;
     }
 
-    return Color(r, g, b, 125); // Альфа 125, как у вас
+    return Color(r, g, b, a); 
 }
 
 
 
 
-void generate_heat_map_tile(int z, int x, int y) {
+void generate_heat_map_tile(int z, int x, int y, int filter_pci) {
     int max_tile = (int)std::pow(2, z) - 1;
     if (x < 0 || x > max_tile || y < 0 || y > max_tile) return;
- 
-    std::string folder = "heatTiles/" + std::to_string(z) + "/" + std::to_string(x);
-    std::string path = folder + "/" + std::to_string(y) + ".png";
- 
+
+    // 1. ИСПРАВЛЕННЫЙ ПУТЬ: учитываем вложенность папок zoom/x/y
+    std::string folder_base = (filter_pci == -1) ? "heatTiles/all/" : "heatTiles/pci_" + std::to_string(filter_pci) + "/";
+    std::string full_folder_path = folder_base + std::to_string(z) + "/" + std::to_string(x) + "/";
+    std::string path = full_folder_path + std::to_string(y) + ".png";
+
     if (std::filesystem::exists(path)) return;
-    std::filesystem::create_directories(folder);
- 
+    
+    // Создаем всю цепочку директорий
+    std::filesystem::create_directories(full_folder_path);
+
     const int w = 256;
     const int h = 256;
     const int channels = 4;
-
-    int idx;
-    
-    Color current(0,0,0,0);
- 
-    int weight = 0;
-   
     std::vector<unsigned char> image(w * h * channels, 0);
- 
-   
-    for (int py = 0; py < h; ++py) {
-        for (int px = 0; px < w; ++px) {
-                current = gradientColor(px*3);
-                idx = (py *w + px) * channels;
 
-                image[idx + 0] = current.r;
-                image[idx + 1] = current.g;
-                image[idx + 2] = current.b;
-                image[idx + 3] = current.a;            
+    struct HeatPoint { double px, py; double rsrp; };
+    std::vector<HeatPoint> points;
+
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        for (size_t i = 0; i < net_lats.size(); ++i) {
+            
+            // 2. ДОБАВЛЕНО: Фильтрация по PCI
+            // Если filter_pci != -1, берем только точки этого PCI
+            if (filter_pci != -1 && net_pcis[i] != filter_pci) continue;
+
+            double f_x = lon2tile(net_lons[i], z);
+            double f_y = lat2tile(net_lats[i], z);
+
+            // Берем точки из текущего тайла + запас для плавности на краях
+            if (f_x >= x - 0.5 && f_x <= x + 1.5 && f_y >= y - 0.5 && f_y <= y + 1.5) {
+                points.push_back({ (f_x - x) * 256.0, (f_y - y) * 256.0, (double)net_rsrp[i] });
+            }
         }
     }
 
- 
-    // Всегда пишем файл — даже пустой, чтобы не перезапускать поток каждый кадр
+    // Если для данного PCI в этой области нет данных - рисуем прозрачный или пустой тайл
+    if (points.empty()) {
+        // Оставляем image заполненным нулями (полная прозрачность), 
+        // чтобы не перекрывать основную карту, если данных нет
+        stbi_write_png(path.c_str(), w, h, channels, image.data(), w * channels);
+        return;
+    }
+
+    const double p = 4.0; 
+    
+    for (int py = 0; py < h; ++py) {
+        for (int px = 0; px < w; ++px) {
+            double sum_weighted_rsrp = 0.0;
+            double sum_weights = 0.0;
+
+            for (const auto& pt : points) {
+                double dx = px - pt.px;
+                double dy = py - pt.py;
+                double d2 = dx * dx + dy * dy;
+
+                if (d2 < 0.1) {
+                    sum_weighted_rsrp = pt.rsrp;
+                    sum_weights = 1.0;
+                    break;
+                }
+
+                double weight = 1.0 / std::pow(d2, p / 2.0);
+                sum_weights += weight;
+                sum_weighted_rsrp += pt.rsrp * weight;
+            }
+
+            double background_rsrp = -110.0;
+            double background_weight = 0.00001; 
+            
+            double final_rsrp = (sum_weighted_rsrp + background_rsrp * background_weight) / (sum_weights + background_weight);
+
+            double norm = (final_rsrp + 110.0) / 30.0; 
+            norm = std::clamp(norm, 0.0, 1.0);
+
+            Color c = gradientColor((int)(norm * 767.0));
+
+            int idx = (py * w + px) * channels;
+            image[idx + 0] = c.r;
+            image[idx + 1] = c.g;
+            image[idx + 2] = c.b;
+            image[idx + 3] = c.a; 
+        }
+    }
+
     stbi_write_png(path.c_str(), w, h, channels, image.data(), w * channels);
-    std::cout << "[HEAT] Tile written: " << path <<  std::endl;
 }
- 
-
-
 void thread_loader(int z, int x, int y) {
     download_tile_cpr(z, x, y);
-    generate_heat_map_tile(z,x,y);
+    //generate_heat_map_tile(z,x,y);
 }
 GLuint LoadTexture(const char* filename) { // получаем путь к файлу 
     int width, height, channels; 

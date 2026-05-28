@@ -16,3 +16,7 @@ std::map<int, std::vector<float>> pci_rsrp_map;
 std::vector<int> earfcn_for_circles;
 std::vector<int> band_for_circles;
 std::mutex data_mutex;
+
+int target_pci=0;
+
+std::vector<HO> HOS;

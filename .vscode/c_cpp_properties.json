@@ -13,7 +13,9 @@
                 "${workspaceFolder}/third_party/libzmq/include",
                 "${workspaceFolder}/third_party/json/include",
                 "${workspaceFolder}/third_party/libpqxx/include",
-                "${workspaceFolder}/build/third_party/libpqxx/include"
+                "${workspaceFolder}/build/third_party/libpqxx/include",
+                "${workspaceFolder}/src/backend",
+                "${workspaceFolder}/src/gui"
             ],
             "defines": [
                 "_DEBUG",

@@ -20,6 +20,27 @@ typedef struct {
     int n_offs_dl;
 } LteBandParams;
 
+
+class HO {
+    public:
+        int f_pci;
+        int s_pci;
+        double lat;
+        double lon;
+
+        HO(
+            int f_pcit,
+            int s_pcit,
+            double latt,
+            double lont
+        ){
+            f_pci = f_pcit;
+            s_pci = s_pcit;
+            lat = latt;
+            lon = lont;
+        }
+
+};
 struct Color {
     unsigned char  r, g, b, a;
 };
