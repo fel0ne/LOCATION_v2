@@ -25,14 +25,20 @@
 ## 📂 Структура базы данных
 Используется таблица location_history с уникальным индексом по grid_key для исключения избыточности.
 
-## 📥 Установка и сборка
-Для работы требуются библиотеки: libzmq3-dev, libpqxx-dev, libglfw3-dev, libcurl4-openssl-dev.
+## Зависимости для Linux (Ubuntu / Linux Mint)
 
+Перед сборкой проекта необходимо установить системные библиотеки (PostgreSQL клиент, GLEW, Meson и компоненты X11/Wayland для SDL3):
+
+```bash
+sudo apt update && sudo apt install -y libpq-dev meson ninja-build libglew-dev libasound2-dev libxcursor-dev libxi-dev libxinerama-dev libxkbcommon-dev libxss-dev libxtst-dev libwayland-dev libegl1-mesa-dev libgbm-dev libdrm-dev libdbus-1-dev libibus-1.0-dev
+```
 Команды для сборки:
+
+```bash
 mkdir build && cd build
 cmake ..
 make
-./gps_map_viewer
+```
 
 ## 🧪 Тестирование
 Для имитации входящих данных можно использовать Python-скрипт
